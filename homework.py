@@ -2,7 +2,8 @@ import logging
 import os
 import requests
 import time
-from sys import exit
+from http import HTTPStatus
+from sys import exit, stdout
 
 import telegram
 from dotenv import load_dotenv
@@ -10,36 +11,29 @@ from dotenv import load_dotenv
 from exceptions import UnknownHomeWorkStatus, HomeWorkNameError
 
 load_dotenv()
-# Настраиваем логгер:
-logger = logging.getLogger(__name__)
-formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
-handler = logging.StreamHandler()
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-logger.setLevel(logging.DEBUG)
-
 # Объявляем глобальные переменные:
-PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-RETRY_PERIOD = 600
-ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
-HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
-HOMEWORK_VERDICTS = {
+PRACTICUM_TOKEN: str = os.getenv('PRACTICUM_TOKEN')
+TELEGRAM_TOKEN: str = os.getenv('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID: str = os.getenv('TELEGRAM_CHAT_ID')
+RETRY_PERIOD: int = 600
+ENDPOINT: str = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
+HEADERS: dict = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
+HOMEWORK_VERDICTS: dict = {
     'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
     'reviewing': 'Работа взята на проверку ревьюером.',
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
+logger = logging.getLogger(__name__)
 
 
-def check_tokens():
+def check_tokens() -> bool:
     """Проверка токенов."""
-    if PRACTICUM_TOKEN and TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        return True
+    return all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID])
 
 
-def send_message(bot, message):
+def send_message(bot: telegram.bot.Bot, message: str) -> None:
     """Отправка сообщения в чат пользователю."""
+    logger.debug('Запущена функция отправки сообщения в телеграм...')
     try:
         bot.send_message(TELEGRAM_CHAT_ID, message)
         logger.debug('Сообщение успешно отправлено в чат.')
@@ -48,57 +42,62 @@ def send_message(bot, message):
         raise telegram.error.TelegramError
 
 
-def get_api_answer(timestamp):
+def get_api_answer(timestamp: int) -> dict:
     """Проверка ответа API практикума."""
-    payload = {'from_date': timestamp}
+    logger.debug('Запущена функция запроса к API практикума...')
+    payload: dict = {'from_date': timestamp}
     try:
         response = requests.get(ENDPOINT, headers=HEADERS, params=payload)
-    except requests.exceptions.ConnectionError:
-        logger.error('Сервер недоступен')
     except requests.RequestException as ex:
         logger.error(f'запрос к API сервера завершен с ошибкой: {ex}')
-    if response.status_code == 200:
+    if response.status_code == HTTPStatus.OK:
+        logger.debug('Запрос к API завершен успешно')
         return response.json()
+    elif response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR:
+        logger.error('Внутренняя ошибка сервера')
+    elif response.status_code == HTTPStatus.NOT_FOUND:
+        logger.error('Запрашиваемые данные не найдены на сервере')
+    else:
+        logger.debug(
+            f'Неожиданный код состояния HTTP запроса: {response.status_code}'
+        )
     raise requests.RequestException
 
 
-def check_response(response):
+def check_response(response: dict) -> None:
     """Проверка корректности данных в ответе от сервера."""
-    check_structure = isinstance(response, dict)
-    if not check_structure:
+    if not isinstance(response, dict):
         logger.error('Неверный тип данных в ответе API.')
         raise TypeError
-
-    check_content = (
+    if (
         isinstance(response.get('homeworks'), list)
     ) and (
-        'homeworks' in response.keys()
-    ) or (
-        'error' in response.keys()
-    )
-    if not check_content:
-        logger.error('Неверная структура файла json()')
-        raise TypeError
-    if 'error' in response.keys():
-        error = response.get('error')
+        'homeworks' in response
+    ):
+        logger.debug('валидация файла json прошла успешно.')
+    elif 'error' in response:
+        error_desc = response.get('error')
         logger.debug(
-            f'Не удалось получить валидные данные json(). Ошибка {error}'
+            f'Данные файла json не валидны. Ошибка {error_desc}.'
         )
+    else:
+        logger.error('Неверная структура файла json')
+        raise TypeError
 
 
-def parse_status(homework):
+def parse_status(homework: dict) -> str:
     """Проверка статуса домашней работы."""
-    current_hw_status = homework.get('status')
+    current_hw_status: str = homework.get('status')
     if current_hw_status not in HOMEWORK_VERDICTS:
         raise UnknownHomeWorkStatus('Недопустимое значение ключа статуса')
-    homework_name = homework.get('homework_name')
+    homework_name: str = homework.get('homework_name')
     if not homework_name:
         raise HomeWorkNameError('Ошибка в значении ключа названия работы')
-    verdict = HOMEWORK_VERDICTS.get(current_hw_status)
+    verdict: str = HOMEWORK_VERDICTS.get(current_hw_status)
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
-def main():
+def main() -> None:
     """Основная логика работы бота."""
     if check_tokens():
         logger.debug('Проверка токенов успешно выполнена.')
@@ -110,7 +109,7 @@ def main():
         exit()
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     timestamp = int(time.time())
-    last_message = None
+    last_message = ''
     while True:
         try:
             response = get_api_answer(timestamp)
@@ -134,4 +133,10 @@ def main():
 
 
 if __name__ == '__main__':
+    # Настраиваем логгер:
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+    handler = logging.StreamHandler(stream=stdout)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
     main()
